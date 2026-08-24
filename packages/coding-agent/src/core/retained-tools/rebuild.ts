@@ -15,6 +15,7 @@ import {
 	type ToolUsage,
 } from "./index.js";
 import { parseRetainedMeta, type RetainedMeta } from "./meta.js";
+import { takeSkillSnapshot } from "./snapshots.js";
 
 export type { RetainedMeta };
 
@@ -64,6 +65,8 @@ export interface ScopeIndexRefreshOptions {
 	skillsRoot: string;
 	/** Root that stored `path` values are relative to (agentDir for global, cwd for project). */
 	pathRoot: string;
+	/** Snapshot root for lazy retained-skill snapshots; defaults to `<agentDir>/skills-versions`. */
+	snapshotsDir?: string;
 }
 
 /**
@@ -95,14 +98,30 @@ export function refreshScopeIndex(options: ScopeIndexRefreshOptions): ToolIndex 
 		const relPath = toPosixPath(relative(pathRoot, artifactPath));
 		const existing = index.skills[skill.name];
 		const carried = existing && existing.path === relPath ? existing : undefined;
+		const descriptionHash = hashDescription(skill.description);
 		nextSkills[skill.name] = {
 			scope,
 			path: relPath,
 			...readRetainedMeta(skill.filePath),
 			usage: carried ? carried.usage : zeroToolUsage(),
-			description_hash: hashDescription(skill.description),
+			description_hash: descriptionHash,
 			embedding: carried ? carried.embedding : [],
 		};
+		// Lazy snapshot: a retained skill whose description changed since the prior
+		// load is snapshotted at its current frontmatter version. First load (no
+		// prior entry) and plain skills never take a snapshot; failures must never
+		// break the load.
+		if (skill.retained !== undefined && existing !== undefined && existing.description_hash !== descriptionHash) {
+			try {
+				takeSkillSnapshot({ scope, name: skill.name, skillPath: artifactPath, versionsDir: options.snapshotsDir });
+			} catch (error) {
+				log.warn("retained tool snapshot failed", {
+					scope,
+					name: skill.name,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 	}
 
 	index.skills = nextSkills;
@@ -132,9 +151,15 @@ export function refreshToolIndexes(options: RefreshToolIndexesOptions): RefreshT
 	const agentDir = options.agentDir ?? getAgentDir();
 	const cwd = resolve(options.cwd);
 
-	const refresh = (scope: ToolScope, toolsDir: string, skillsRoot: string, pathRoot: string): ToolIndex => {
+	const refresh = (
+		scope: ToolScope,
+		toolsDir: string,
+		skillsRoot: string,
+		pathRoot: string,
+		snapshotsDir: string,
+	): ToolIndex => {
 		try {
-			return refreshScopeIndex({ scope, toolsDir, skillsRoot, pathRoot });
+			return refreshScopeIndex({ scope, toolsDir, skillsRoot, pathRoot, snapshotsDir });
 		} catch (error) {
 			log.warn("tool index refresh failed", {
 				scope,
@@ -144,8 +169,16 @@ export function refreshToolIndexes(options: RefreshToolIndexesOptions): RefreshT
 		}
 	};
 
+	const snapshotsDir = join(agentDir, "skills-versions");
+
 	return {
-		global: refresh("global", join(agentDir, "tools"), join(agentDir, "skills"), agentDir),
-		project: refresh("project", join(cwd, CONFIG_DIR_NAME, "tools"), resolve(cwd, CONFIG_DIR_NAME, "skills"), cwd),
+		global: refresh("global", join(agentDir, "tools"), join(agentDir, "skills"), agentDir, snapshotsDir),
+		project: refresh(
+			"project",
+			join(cwd, CONFIG_DIR_NAME, "tools"),
+			resolve(cwd, CONFIG_DIR_NAME, "skills"),
+			cwd,
+			snapshotsDir,
+		),
 	};
 }
