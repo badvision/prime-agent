@@ -1,0 +1,1 @@
+- Added automatic content snapshots for retained tools with keep-10 rotation and a restore primitive for rollback support.

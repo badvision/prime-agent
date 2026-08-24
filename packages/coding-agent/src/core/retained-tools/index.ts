@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../../config.js";
 
 export type ToolScope = "global" | "project";
@@ -80,18 +80,26 @@ export function loadToolIndex(toolsDir: string): ToolIndex {
 	return raw as ToolIndex;
 }
 
-export function saveToolIndex(toolsDir: string, index: ToolIndex): string {
-	const indexPath = getToolIndexPath(toolsDir);
-	const tempPath = `${indexPath}.${process.pid}.${randomUUID()}.tmp`;
-	mkdirSync(toolsDir, { recursive: true });
+/**
+ * Atomic file write: write to a sibling temp file, then rename onto the target.
+ * An interrupted write leaves the target untouched and the temp file removed.
+ */
+export function atomicWriteFileSync(targetPath: string, data: string): void {
+	const tempPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
+	mkdirSync(dirname(targetPath), { recursive: true });
 	try {
-		const mode = existsSync(indexPath) ? statSync(indexPath).mode & 0o777 : 0o600;
-		writeFileSync(tempPath, `${JSON.stringify(index, null, 2)}\n`, { encoding: "utf8", mode });
-		renameSync(tempPath, indexPath);
+		const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
+		writeFileSync(tempPath, data, { encoding: "utf8", mode });
+		renameSync(tempPath, targetPath);
 	} finally {
 		if (existsSync(tempPath)) {
 			unlinkSync(tempPath);
 		}
 	}
+}
+
+export function saveToolIndex(toolsDir: string, index: ToolIndex): string {
+	const indexPath = getToolIndexPath(toolsDir);
+	atomicWriteFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`);
 	return indexPath;
 }
