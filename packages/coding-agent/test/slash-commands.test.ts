@@ -6,6 +6,7 @@ import {
 	isBuiltinSlashCommandName,
 	isSessionSlashCommandName,
 	parseRefineCommandOptions,
+	parseRetainCommandOptions,
 	parseSessionSlashCommand,
 	parseSlashCommand,
 	resolveBuiltinSlashCommandName,
@@ -238,6 +239,45 @@ describe("session slash commands", () => {
 		for (const args of ["rollback", "rollback --global"]) {
 			expect(() => parseRefineCommandOptions(args)).toThrow("Usage: /refine rollback <refinement-id>");
 		}
+	});
+
+	test('parses /retain "<what>" with optional leading or trailing --global', () => {
+		expect(parseRetainCommandOptions('"deploy to staging with a canary"')).toEqual({
+			what: "deploy to staging with a canary",
+			global: false,
+		});
+		expect(parseRetainCommandOptions('--global "deploy to staging with a canary"')).toEqual({
+			what: "deploy to staging with a canary",
+			global: true,
+		});
+		expect(parseRetainCommandOptions('"deploy to staging with a canary" --global')).toEqual({
+			what: "deploy to staging with a canary",
+			global: true,
+		});
+	});
+
+	test("rejects /retain input that is not exactly one double-quoted string", () => {
+		for (const args of [
+			"",
+			"--global",
+			"deploy to staging",
+			'"unterminated',
+			'"one" "two"',
+			'"" ',
+			'"   "',
+			'"a" extra',
+		]) {
+			expect(() => parseRetainCommandOptions(args)).toThrow('Usage: /retain "<what>" [--global]');
+		}
+	});
+
+	test("registers /retain as a session-executed argument command", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "retain")).toMatchObject({
+			description: "Retain a solved procedure from this session as a reusable skill",
+			execution: "session",
+			argumentHint: '"<what>" [--global]',
+			takesArgument: true,
+		});
 	});
 
 	test("registers /tools as a session-executed argument command", () => {

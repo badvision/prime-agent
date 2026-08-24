@@ -1,0 +1,1 @@
+- Added `/retain "<what>"` to materialize the current session's solved procedure as a reusable, versioned skill (markdown path).
