@@ -10,7 +10,7 @@ export interface SlashCommandInfo {
 	sourceInfo: SourceInfo;
 }
 
-export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous", "tools"] as const;
+export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "retain", "goal", "autonomous", "tools"] as const;
 
 export type SessionSlashCommandName = (typeof SESSION_SLASH_COMMAND_NAMES)[number];
 
@@ -30,6 +30,36 @@ export interface RefineCommandOptions {
 	instructions?: string;
 	rollbackId?: string;
 	global?: boolean;
+}
+
+export interface RetainCommandOptions {
+	what: string;
+	global: boolean;
+}
+
+const RETAIN_USAGE = 'Usage: /retain "<what>" [--global]';
+
+/**
+ * Strict parser (modeled on parseRefineCommandOptions's --global stripping):
+ * a leading or trailing `--global` token, then the remainder must be exactly
+ * one double-quoted string. No shell-style multi-token quoting, no
+ * un-quoted fallback -- anything else is rejected with the usage line.
+ */
+export function parseRetainCommandOptions(args: string): RetainCommandOptions {
+	let rest = args.trim();
+	let global = false;
+	if (/^--global(?=\s|$)/.test(rest)) {
+		global = true;
+		rest = rest.replace(/^--global(?=\s|$)/, "").trim();
+	} else if (/(?:^|\s)--global$/.test(rest)) {
+		global = true;
+		rest = rest.replace(/(?:^|\s)--global$/, "").trim();
+	}
+	const match = /^"([^"]*)"$/.exec(rest);
+	if (!match || !match[1].trim()) {
+		throw new Error(RETAIN_USAGE);
+	}
+	return { what: match[1], global };
 }
 
 export function parseRefineCommandOptions(args: string): RefineCommandOptions {
@@ -158,6 +188,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "refine",
 		description: "Refine continual harness prompt notes, skills, subagents, and memory",
+	},
+	{
+		name: "retain",
+		description: "Retain a solved procedure from this session as a reusable skill",
+		argumentHint: '"<what>" [--global]',
+		takesArgument: true,
 	},
 	{
 		name: "goal",

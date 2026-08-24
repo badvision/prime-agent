@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
 	Agent,
 	type AgentContext,
@@ -100,6 +100,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.js";
+import { serializeConversation } from "./compaction/utils.js";
 import {
 	type ContextTreeNode,
 	type ContextWindowResolver,
@@ -164,6 +165,7 @@ import {
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
 	type CustomMessage,
+	convertToLlm,
 	createCompactionOutcomeMessage,
 	createHeartbeatPromptMessage,
 	createRlmChildFailureMessage,
@@ -204,7 +206,9 @@ import {
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import { formatToolsCatalogTable, loadToolsCatalog } from "./retained-tools/catalog.js";
+import { draftRetainedSkillContent } from "./retained-tools/draft.js";
 import type { ToolScope } from "./retained-tools/index.js";
+import { type MaterializeRetainOutcome, materializeRetainedSkill } from "./retained-tools/materialize.js";
 import {
 	ExplicitOutcomeTracker,
 	extractRefinementToolSignals,
@@ -260,6 +264,7 @@ import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 import {
 	parseRefineCommandOptions,
+	parseRetainCommandOptions,
 	parseSessionSlashCommand,
 	parseSlashCommand,
 	type SessionSlashCommand,
@@ -1999,6 +2004,22 @@ export class AgentSession {
 			throw new Error("Usage: /tools [list]");
 		}
 		return formatToolsCatalogTable(loadToolsCatalog({ cwd: this._cwd, agentDir: this._agentDir }));
+	}
+
+	private _formatRetainResult(outcome: MaterializeRetainOutcome): string {
+		switch (outcome.kind) {
+			case "created": {
+				const relativeSkillDir =
+					outcome.scope === "global"
+						? relative(this._toolsAgentDir(), outcome.skillDir)
+						: relative(this._cwd, outcome.skillDir);
+				return `Retained tool "${outcome.name}": ${relativeSkillDir} (status: active, version: 1).`;
+			}
+			case "collision":
+				return `Retain blocked: a skill named "${outcome.name}" already exists (scope: ${outcome.existingScope}, path: ${outcome.existingPath}). Rerun /retain with different wording, or rename the existing skill manually.`;
+			case "invalid-name":
+				return `Retain blocked: could not derive a valid skill name from "${outcome.name}".`;
+		}
 	}
 
 	private _appendBeforeAgentStartMessages(
@@ -6017,6 +6038,12 @@ export class AgentSession {
 					resultText = `Refined continual harness state: ${applied} edit${applied === 1 ? "" : "s"} applied.`;
 					break;
 				}
+				case "retain": {
+					const { what, global } = parseRetainCommandOptions(input.command.args);
+					const outcome = await this.retain(what, { global }, { skipAbort: true });
+					resultText = this._formatRetainResult(outcome);
+					break;
+				}
 				case "goal":
 					await this._handleGoalSlashCommand(input.text, input.images);
 					resultText = this._goalState.objective
@@ -8070,6 +8097,47 @@ export class AgentSession {
 			}
 			this._scheduleSessionInputPump();
 		}
+	}
+
+	/**
+	 * Materialize a solved procedure from this session as a retained skill
+	 * (SARK T07, explicit `/retain` path).
+	 *
+	 * Unlike `refine()`, this does not need its own in-flight guard: queued
+	 * session commands execute one at a time (a single `while` loop in
+	 * `_pumpSessionInputs` awaits each `_executeSelectedSessionCommand` before
+	 * selecting the next queued action), so two `/retain` calls can never run
+	 * concurrently on this session.
+	 */
+	async retain(
+		what: string,
+		options: { global?: boolean } = {},
+		internal: { skipAbort?: boolean } = {},
+	): Promise<MaterializeRetainOutcome> {
+		if (this._disposed) {
+			throw new Error("Cannot retain a solved procedure from a disposed session.");
+		}
+		if (internal.skipAbort && this.isStreaming) {
+			throw new Error("Cannot retain without aborting while the agent is running.");
+		}
+		if (!this.model) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+		const model = this.model;
+		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+		const trajectoryText = serializeConversation(convertToLlm(this.agent.state.messages)).slice(-80_000);
+		const sessionArtifactDir = this.sessionManager.getSessionArtifactDir();
+		const sessionId = sessionArtifactDir ? basename(sessionArtifactDir) : undefined;
+
+		return materializeRetainedSkill({
+			what,
+			scope: options.global ? "global" : "project",
+			cwd: this._cwd,
+			agentDir: this._agentDir,
+			sessionId,
+			trajectoryText,
+			draftSkill: (input) => draftRetainedSkillContent(input, { model, apiKey, headers }),
+		});
 	}
 
 	/**

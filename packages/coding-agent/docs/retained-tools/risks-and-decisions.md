@@ -57,3 +57,17 @@ Sandboxing/permission scoping; automatic MCP endpoint discovery and registration
 - Harness `skill` entries stay thin (`id`-only references) and cannot drift from tool content; drift is detected on the artifact layer via `description_hash` at load.
 - Version snapshots (#6) and rollback (#9) operate on the canonical layer and the derived index; reliability status transitions (phase C) operate on the derived index. The spec layer never stores tool content.
 - Any future state added by this feature must be classified as canonical, derived, or reference before it ships.
+
+### ADR-2 -- Retained tools and the continual harness are disjoint systems that share the word "skill"
+
+**Context.** `/retain` (issue #7) and future phase-E/F materializers write markdown skill directories with retained frontmatter. `refinement.ts` already has a continual-harness `HarnessEntry` of `kind: "skill"`, and its `validateEdit` hard-requires a Python `reference` (import path + callable) for that kind -- a structurally different artifact from a markdown retained-tool skill dir. Both systems use the word "skill", which invites conflating them.
+
+**Decision.** `/retain` (and any future phase-E/F materializer built on `materializeRetainedSkill`) writes only to the retained-tools three-layer system introduced by phase A/B (skill dir -> per-scope `tools/index.json` -> `retain-events.jsonl`). It never creates, updates, or reads a continual-harness `HarnessEntry`, and never touches `refinement.ts`, `meta.ts`, `harness_state.json`, or `refinements.jsonl`. "Records a normal refinement event so standard rollback works" (phase-b-retention.md) is implemented as a `RefinementResult`-*shaped* record appended to a new, retained-tools-scoped `retain-events.jsonl` -- a purpose-built log for #9 (`/tools rollback`) to read from, not an entry in `/refine`'s own history. `HarnessEntry kind: "skill"` remains reserved for installed Python REPL skills with a `python` reference (import + callable), validated by `refinement.ts`'s `validateEdit`.
+
+**Rationale.** `loadGlobalRefinementHistory`'s loose type guard would ingest a retain event if it were appended to `refinements.jsonl`, and `formatHarnessStateForPrompt` renders that history in the prompt overview -- silently exposing retained-tool creation as if it were a harness-state edit. Keeping the two systems disjoint requires zero edits to `refinement.ts`, `meta.ts`, or `index.ts` and keeps each system's rollback path (harness refinement rollback vs. future `/tools rollback`) reading from its own purpose-built log.
+
+**Consequences.**
+
+- `/retain` and refine-driven materialization (#20) share `materializeRetainedSkill`/`retain-events.jsonl`, not `refine`'s edit/rollback machinery.
+- `#9`'s `/tools rollback` reads `retain-events.jsonl` plus the version snapshot store (#6); it does not read `refinements.jsonl`.
+- A future decision to let harness `skill` entries reference retained tools by `id` (ADR-1's "spec layer") remains available without changing this ADR: a thin `id`-only reference is not the same as writing tool content into `harness_state.json`.
